@@ -1,0 +1,39 @@
+# Data files (download via Kaggle API in notebooks)
+data/*.csv
+data/*.pkl
+data/*.parquet
+data/*.zip
+data/*.json
+data/processed/
+
+# Model weights
+models/
+*.pt
+*.bin
+*.safetensors
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Environments
+venv/
+.venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
