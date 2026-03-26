@@ -248,8 +248,9 @@ def dish_to_rich_text(
         parts.append("MACRO_TAGS: " + " ".join(tokens))
 
     # Tags
-    if tags is not None and len(tags) > 0:
-        parts.append("TAGS: " + " ".join(tags))
+    tag_list = list(tags) if tags is not None else []
+    if tag_list:
+        parts.append("TAGS: " + " ".join(str(t) for t in tag_list))
 
     # Ingredients extracted from recipe
     if include_ingredients and recipe:
