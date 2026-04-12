@@ -5,6 +5,7 @@ data/*.parquet
 data/*.zip
 data/*.json
 data/processed/
+data/synthetic/
 
 # Model weights
 models/
