@@ -280,9 +280,15 @@ def _create_user_from_archetype(
 
     has_diabetes = rng.random() < arch.get("diabetes_prob", 0.03)
 
+    archetype_id = next(
+        (i for i, a in enumerate(ARCHETYPES) if a["name"] == arch.get("name")),
+        -1,
+    )
+
     return {
         "user_id": user_id,
         "user_type": user_type,
+        "archetype_id": int(archetype_id),
         "archetype_name": arch.get("name", "hybrid"),
         "goal_type": arch["goal_type"],
         "activity_level": arch["activity_level"],

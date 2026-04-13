@@ -11,7 +11,9 @@ Evaluation protocol used in this case study (see Notebook 2 for details):
 """
 from __future__ import annotations
 
+import json
 import math
+import os
 from typing import Any
 
 import numpy as np
@@ -156,6 +158,23 @@ def evaluate_all(
     result["MRR"] = mrr(recommended, relevant)
 
     return result
+
+
+def load_run_results_json(*candidate_paths: str) -> dict[str, Any]:
+    """Load experiment ``results.json`` from the first path that exists.
+
+    Notebook 2 writes this file under ``OUTPUT_DIR``. On Kaggle/Colab, a new
+    notebook session has an empty ``/kaggle/working/processed`` until NB2 is
+    run to the end or ``results.json`` is supplied (e.g. next to parquets in
+    ``SYNTHETIC_DIR`` or as a competition/dataset input). Pass fallbacks in
+    priority order.
+    """
+    for p in candidate_paths:
+        if p and os.path.isfile(p):
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    return {}
 
 
 # ============================================================
