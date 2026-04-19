@@ -1,7 +1,7 @@
 # Recommendation Systems using Text Embeddings
 ## Case Study: Food Recommendation with Semantic Embeddings
 
-**NLP 2026 · [Author Name] · [University]**
+**NLP 2026**
 
 ---
 
