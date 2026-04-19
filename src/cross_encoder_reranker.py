@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
@@ -95,7 +97,12 @@ class CrossEncoderReranker:
 
         # Build (query, document) pairs
         pairs = [(query, text) for _, text in candidates]
-        ce_scores: list[float] = self._model.predict(pairs).tolist()
+        raw = self._model.predict(pairs, show_progress_bar=False)
+        arr = np.asarray(raw, dtype=np.float64)
+        if arr.ndim == 2:
+            # Some checkpoints return (n, num_labels); take relevance logit / last column
+            arr = arr[:, -1] if arr.shape[1] > 1 else arr[:, 0]
+        ce_scores = arr.reshape(-1).tolist()
 
         ranked = sorted(
             zip([c[0] for c in candidates], ce_scores),
