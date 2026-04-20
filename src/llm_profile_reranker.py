@@ -94,11 +94,72 @@ def user_row_to_profile_text(row: dict[str, Any]) -> str:
 
 
 def _extract_json(text: str) -> Any:
-    text = (text or "").strip()
-    m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])\s*$", text)
-    if not m:
-        raise ValueError(f"No JSON found in model output: {text[:200]!r}")
-    return json.loads(m.group(1))
+    """Parse the first JSON object/array from an LLM message.
+
+    Models often wrap JSON in markdown fences (```json ... ```) or add prose.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("Empty model output")
+
+    # Strip common markdown fences
+    s = raw.replace("\r\n", "\n").strip()
+    s = re.sub(r"^\s*```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*```\s*$", "", s).strip()
+
+    # Prefer a balanced JSON slice if present (handles trailing commentary)
+    def _slice_json(t: str) -> str | None:
+        start_obj = t.find("{")
+        start_arr = t.find("[")
+        if start_obj < 0 and start_arr < 0:
+            return None
+        if start_obj < 0:
+            start = start_arr
+            open_c, close_c = "[", "]"
+        elif start_arr < 0:
+            start = start_obj
+            open_c, close_c = "{", "}"
+        else:
+            start = min(start_obj, start_arr)
+            open_c, close_c = ("{", "}") if start == start_obj else ("[", "]")
+
+        depth = 0
+        in_str = False
+        esc = False
+        quote = ""
+        for i in range(start, len(t)):
+            ch = t[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == quote:
+                    in_str = False
+                continue
+
+            if ch in ("\"", "'"):
+                in_str = True
+                quote = ch
+                continue
+
+            if ch == open_c:
+                depth += 1
+            elif ch == close_c:
+                depth -= 1
+                if depth == 0:
+                    return t[start : i + 1]
+        return None
+
+    blob = _slice_json(s)
+    if blob is None:
+        # Last resort: tail-anchored object/array (legacy behavior)
+        m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])\s*$", s)
+        if not m:
+            raise ValueError(f"No JSON found in model output: {raw[:200]!r}")
+        blob = m.group(1)
+
+    return json.loads(blob)
 
 
 def _parse_ranked_ids(obj: Any) -> list[int]:
@@ -125,29 +186,57 @@ class LLMProfileReranker:
         api_base: str | None = None,
         temperature: float = 0.0,
     ) -> None:
+        # Note: on Kaggle, secrets are often injected into os.environ *after* imports.
+        # We therefore resolve credentials lazily (see ``available`` / ``rerank``).
+        self._api_key_override = (api_key or "").strip()
+        self._api_base_override = (api_base or "").strip()
+        self.model = model
+        self.temperature = temperature
+        self._client: OpenAI | None = None
+        self._client_cache_key: str | None = None
+        self._client_cache_base: str | None = None
+
+    def _credentials(self) -> tuple[str, str]:
         env = _load_repo_dotenv()
         key = (
-            (api_key or "").strip()
+            self._api_key_override
             or os.environ.get("OPENAI_API_KEY", "").strip()
             or env.get("OPENAI_API_KEY", "").strip()
+            or os.environ.get("ORACLE_API_KEY", "").strip()
             or env.get("ORACLE_API_KEY", "").strip()
         )
         base = (
-            (api_base or "").strip()
+            self._api_base_override
             or os.environ.get("OPENAI_BASE_URL", "").strip()
             or env.get("OPENAI_BASE_URL", "").strip()
+            or os.environ.get("ORACLE_API_BASE", "").strip()
             or env.get("ORACLE_API_BASE", "").strip()
             or "https://openrouter.ai/api/v1"
         )
-        self._api_key = key
-        self._api_base = base
-        self.model = model
-        self.temperature = temperature
-        self._client: OpenAI | None = OpenAI(api_key=key, base_url=base) if key else None
+        return key, base
+
+    def _ensure_client(self) -> OpenAI | None:
+        key, base = self._credentials()
+        if not key:
+            self._client = None
+            self._client_cache_key = None
+            self._client_cache_base = None
+            return None
+        # Recreate client if credentials changed (env updated after construction).
+        if (
+            self._client is None
+            or self._client_cache_key != key
+            or self._client_cache_base != base
+        ):
+            self._client = OpenAI(api_key=key, base_url=base)
+            self._client_cache_key = key
+            self._client_cache_base = base
+        return self._client
 
     @property
     def available(self) -> bool:
-        return self._client is not None and bool(self._api_key)
+        key, _ = self._credentials()
+        return bool(key)
 
     def rerank(
         self,
@@ -159,7 +248,8 @@ class LLMProfileReranker:
         """Return up to ``top_k`` dish IDs in LLM order (closed-world over candidates)."""
         if not candidates:
             return []
-        if not self.available or self._client is None:
+        client = self._ensure_client()
+        if client is None:
             return [c[0] for c in candidates[:top_k]]
 
         cand_lines: list[str] = []
@@ -174,9 +264,12 @@ class LLMProfileReranker:
             "Task: pick the candidates most likely to be co-preferred with QUERY_DISH for this user,\n"
             "using USER_PROFILE constraints (allergens, goals, macros, price) when applicable.\n"
             "Return ONLY valid JSON: {\"ranked_ids\": [<int>, ...]}.\n"
+            "Formatting rules:\n"
+            "- Output raw JSON only (no markdown, no ``` fences, no commentary).\n"
             "Rules:\n"
             "- ranked_ids MUST be a permutation of ALL candidate ids shown (same set, same length).\n"
             "- Do NOT invent ids.\n"
+            "- Do NOT duplicate ids.\n"
             "- Most likely items first.\n"
         )
 
@@ -189,7 +282,7 @@ class LLMProfileReranker:
             + "\n".join(cand_lines)
         )
 
-        resp = self._client.chat.completions.create(
+        resp = client.chat.completions.create(
             model=self.model,
             temperature=float(self.temperature),
             messages=[
