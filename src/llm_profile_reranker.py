@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH_BACKEND = REPO_ROOT / "backend" / ".env"
@@ -185,6 +186,9 @@ class LLMProfileReranker:
         api_key: str | None = None,
         api_base: str | None = None,
         temperature: float = 0.0,
+        timeout_s: float | None = None,
+        max_retries: int | None = None,
+        candidate_text_max_chars: int | None = None,
     ) -> None:
         # Note: on Kaggle, secrets are often injected into os.environ *after* imports.
         # We therefore resolve credentials lazily (see ``available`` / ``rerank``).
@@ -192,6 +196,21 @@ class LLMProfileReranker:
         self._api_base_override = (api_base or "").strip()
         self.model = model
         self.temperature = temperature
+        self.timeout_s = (
+            float(os.environ.get("LLM_RERANK_TIMEOUT_S", "60"))
+            if timeout_s is None
+            else float(timeout_s)
+        )
+        self.max_retries = (
+            int(os.environ.get("LLM_RERANK_MAX_RETRIES", "4"))
+            if max_retries is None
+            else int(max_retries)
+        )
+        self.candidate_text_max_chars = (
+            int(os.environ.get("LLM_RERANK_CAND_TEXT_CHARS", "280"))
+            if candidate_text_max_chars is None
+            else int(candidate_text_max_chars)
+        )
         self._client: OpenAI | None = None
         self._client_cache_key: str | None = None
         self._client_cache_base: str | None = None
@@ -228,7 +247,7 @@ class LLMProfileReranker:
             or self._client_cache_key != key
             or self._client_cache_base != base
         ):
-            self._client = OpenAI(api_key=key, base_url=base)
+            self._client = OpenAI(api_key=key, base_url=base, timeout=self.timeout_s)
             self._client_cache_key = key
             self._client_cache_base = base
         return self._client
@@ -254,9 +273,13 @@ class LLMProfileReranker:
 
         cand_lines: list[str] = []
         allowed: set[int] = set()
+        max_chars = max(64, int(self.candidate_text_max_chars))
         for did, txt in candidates:
             allowed.add(int(did))
-            cand_lines.append(f"- id={int(did)} :: {str(txt).strip()}")
+            t = str(txt).strip().replace("\n", " ")
+            if len(t) > max_chars:
+                t = t[: max_chars - 1] + "…"
+            cand_lines.append(f"- id={int(did)} :: {t}")
 
         system = (
             "You rerank food dish candidates for the SAME user under an item-to-item co-preference task.\n"
@@ -285,16 +308,51 @@ class LLMProfileReranker:
             + "\n".join(cand_lines)
         )
 
-        resp = client.chat.completions.create(
-            model=self.model,
-            temperature=float(self.temperature),
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        )
-        content = resp.choices[0].message.content or ""
-        ranked = _parse_ranked_ids(_extract_json(content))
+        last_err: Exception | None = None
+        content = ""
+        ranked: list[int] | None = None
+        debug = os.environ.get("LLM_RERANK_DEBUG", "").strip() in ("1", "true", "True", "yes", "YES")
+
+        attempts = max(1, int(self.max_retries))
+        for attempt in range(attempts):
+            try:
+                if debug:
+                    print(f"[llm_profile_reranker] request attempt={attempt+1}/{attempts} model={self.model}")
+                resp = client.chat.completions.create(
+                    model=self.model,
+                    temperature=float(self.temperature),
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                )
+                content = resp.choices[0].message.content or ""
+                ranked = _parse_ranked_ids(_extract_json(content))
+                break
+            except (APITimeoutError, APIConnectionError, RateLimitError) as e:
+                last_err = e
+                # Shared gateways can throttle; keep backoff bounded so a run doesn't "feel hung".
+                time.sleep(min(8.0, 0.5 * (2**attempt)))
+            except (json.JSONDecodeError, ValueError) as e:
+                # Bad JSON / unexpected shape — retry once or twice often fixes it.
+                last_err = e
+                time.sleep(min(4.0, 0.25 * (2**attempt)))
+            except Exception as e:
+                # Some gateways return 5xx as generic exceptions; retry a few times.
+                msg = str(e).lower()
+                if any(s in msg for s in ("timeout", "timed out", "connection", "rate", "429", "503", "502")):
+                    last_err = e
+                    time.sleep(min(8.0, 0.5 * (2**attempt)))
+                    continue
+                raise
+        else:
+            # Hard failure: fall back to dense candidate order (caller still gets a completed eval run).
+            if debug:
+                print(f"[llm_profile_reranker] giving up after {attempts} attempts: {last_err!r}")
+            return [c[0] for c in candidates[: int(top_k)]]
+
+        if ranked is None:
+            return [c[0] for c in candidates[: int(top_k)]]
 
         # Sanitize: keep only allowed, unique, then append missing in original order
         out: list[int] = []
