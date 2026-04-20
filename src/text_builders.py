@@ -13,6 +13,7 @@ Key design principle (see case_study_spec section 0.3):
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -90,6 +91,76 @@ _COOKING_VERBS_RE = re.compile(
     r"season|marinate|simmer|roast|grill|blend|mince|peel|cut|fold)\b",
     re.IGNORECASE,
 )
+
+
+def _scalar_float(val: Any, default: float = 0.0) -> float:
+    """Coerce pandas/numpy scalars; map NaN/inf to default."""
+    if val is None:
+        return default
+    try:
+        x = float(val)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(x) or math.isinf(x):
+        return default
+    return x
+
+
+def _pick_kcal(dish: dict) -> float:
+    """Prefer explicit calories; avoid ``or`` so 0 does not skip the key."""
+    for key in ("calories", "kcal_per_100g", "kcal_per_portion"):
+        if key not in dish:
+            continue
+        v = _scalar_float(dish.get(key))
+        if v > 0:
+            return v
+    if "calories" in dish:
+        return _scalar_float(dish.get("calories"))
+    if "kcal_per_100g" in dish:
+        return _scalar_float(dish.get("kcal_per_100g"))
+    return 0.0
+
+
+def _pick_macro_g(dish: dict, *keys: str) -> float:
+    for key in keys:
+        if key in dish and dish[key] is not None:
+            return _scalar_float(dish[key])
+    for key in keys:
+        v = dish.get(key)
+        if v is not None:
+            return _scalar_float(v)
+    return 0.0
+
+
+def _as_clean_str(val: Any) -> str:
+    if val is None:
+        return ""
+    s = str(val).strip()
+    if not s or s.lower() in ("nan", "none", "<na>"):
+        return ""
+    return s
+
+
+def _ingredients_list(dish: dict) -> list[str]:
+    """Normalize ingredients from list / tuple / ndarray (parquet / ``to_dict()``)."""
+    raw = dish.get("ingredients")
+    if raw is None:
+        return []
+    if hasattr(raw, "tolist"):
+        try:
+            raw = raw.tolist()
+        except Exception:
+            return []
+    if isinstance(raw, (list, tuple)):
+        out: list[str] = []
+        for x in raw:
+            if x is None:
+                continue
+            s = str(x).strip()
+            if s and s.lower() not in ("nan", "none"):
+                out.append(s)
+        return out
+    return []
 
 
 def extract_ingredients(recipe_text: str) -> list[str]:
@@ -209,15 +280,15 @@ def dish_to_rich_text(
         >>> text = dish_to_rich_text(dish, tags,
         ...     include_recipe=False, include_macro_tokens=False, include_ratios=True)
     """
-    name = dish.get("name") or ""
-    desc = dish.get("description") or dish.get("short_description") or ""
-    recipe = dish.get("recipe_text") or dish.get("instructions") or ""
+    name = _as_clean_str(dish.get("name"))
+    desc = _as_clean_str(dish.get("description")) or _as_clean_str(dish.get("short_description"))
+    recipe = _as_clean_str(dish.get("recipe_text")) or _as_clean_str(dish.get("instructions"))
 
-    kcal = float(dish.get("calories") or dish.get("kcal_per_100g") or 0)
-    p = float(dish.get("protein_g") or dish.get("protein_g_per_100g") or 0)
-    f = float(dish.get("fat_g") or dish.get("fat_g_per_100g") or 0)
-    c = float(dish.get("carbs_g") or dish.get("carbs_g_per_100g") or 0)
-    fiber = float(dish.get("fiber_g") or dish.get("fiber_g_per_100g") or 0)
+    kcal = _pick_kcal(dish)
+    p = _pick_macro_g(dish, "protein_g", "protein_g_per_100g")
+    fat = _pick_macro_g(dish, "fat_g", "fat_g_per_100g")
+    c = _pick_macro_g(dish, "carbs_g", "carbs_g_per_100g")
+    fiber = _pick_macro_g(dish, "fiber_g", "fiber_g_per_100g")
 
     parts: list[str] = []
 
@@ -233,30 +304,37 @@ def dish_to_rich_text(
     # Nutrition line
     nutrition = (
         f"NUTRITION: {kcal:.0f} kcal, {p:.0f}g protein, "
-        f"{f:.0f}g fat, {c:.0f}g carbs, {fiber:.0f}g fiber"
+        f"{fat:.0f}g fat, {c:.0f}g carbs, {fiber:.0f}g fiber"
     )
     if include_ratios and kcal > 0:
         pr = (p * 4) / kcal
-        fr = (f * 9) / kcal
+        fr = (fat * 9) / kcal
         cr = (c * 4) / kcal
         nutrition += f" | protein_ratio: {pr:.2f}, fat_ratio: {fr:.2f}, carb_ratio: {cr:.2f}"
     parts.append(nutrition)
 
     # Discrete macro tokens (baseline only)
     if include_macro_tokens:
-        tokens = macro_tokens(kcal, p, f, c)
+        tokens = macro_tokens(kcal, p, fat, c)
         parts.append("MACRO_TAGS: " + " ".join(tokens))
 
-    # Tags
-    tag_list = list(tags) if tags is not None else []
+    # Tags (may be ndarray from pandas)
+    tag_list: list[str] = []
+    if tags is not None:
+        seq = tags.tolist() if hasattr(tags, "tolist") else list(tags)
+        tag_list = [str(t) for t in seq]
     if tag_list:
-        parts.append("TAGS: " + " ".join(str(t) for t in tag_list))
+        parts.append("TAGS: " + " ".join(tag_list))
 
-    # Ingredients extracted from recipe
-    if include_ingredients and recipe:
-        ingredients = extract_ingredients(recipe)
-        if ingredients:
-            parts.append("INGREDIENTS: " + ", ".join(ingredients))
+    # Ingredients: prefer structured list (incl. ndarray from parquet); else heuristics on recipe
+    if include_ingredients:
+        structured = _ingredients_list(dish)
+        if structured:
+            parts.append("INGREDIENTS: " + ", ".join(structured))
+        elif recipe:
+            ingredients = extract_ingredients(recipe)
+            if ingredients:
+                parts.append("INGREDIENTS: " + ", ".join(ingredients))
 
     # Recipe text (baseline: included, improvement: removed)
     if include_recipe and recipe:
@@ -307,15 +385,6 @@ def user_static_to_text(
         names = [a.get("allergen_name", "").upper() for a in allergens if a.get("allergen_name")]
         if names:
             parts.append("ALLERGIES: " + ", ".join(f"NO {a}" for a in names))
-
-    if habits:
-        habit_parts = []
-        if habits.get("smoking"):
-            habit_parts.append("SMOKER")
-        if habits.get("alcohol") and habits.get("alcohol") != "none":
-            habit_parts.append(f"ALCOHOL_{habits['alcohol'].upper()}")
-        if habit_parts:
-            parts.append("HABITS: " + ", ".join(habit_parts))
 
     return "\n".join(parts)
 
