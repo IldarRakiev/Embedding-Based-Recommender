@@ -259,10 +259,13 @@ class LLMProfileReranker:
             cand_lines.append(f"- id={int(did)} :: {str(txt).strip()}")
 
         system = (
-            "You rerank food dish candidates for the SAME user.\n"
-            "You will be given: USER_PROFILE, QUERY_DISH the user already likes, and CANDIDATES.\n"
-            "Task: pick the candidates most likely to be co-preferred with QUERY_DISH for this user,\n"
-            "using USER_PROFILE constraints (allergens, goals, macros, price) when applicable.\n"
+            "You rerank food dish candidates for the SAME user under an item-to-item co-preference task.\n"
+            "Interpretation: USER_PROFILE + QUERY_DISH are observational context; CANDIDATES are alternatives.\n"
+            "Your goal is to order candidates by the probability that the user would positively interact\n"
+            "(order/favorite) with each candidate *in addition to* liking QUERY_DISH — i.e. co-preference\n"
+            "with QUERY_DISH within this user's taste, not generic 'healthy eating advice'.\n"
+            "Use ONLY information present in USER_PROFILE, QUERY_DISH, and each candidate line.\n"
+            "Do not invent ingredients, allergens, cuisines, brands, medical claims, or unstated user facts.\n"
             "Return ONLY valid JSON: {\"ranked_ids\": [<int>, ...]}.\n"
             "Formatting rules:\n"
             "- Output raw JSON only (no markdown, no ``` fences, no commentary).\n"
