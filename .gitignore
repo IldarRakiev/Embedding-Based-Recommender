@@ -32,6 +32,11 @@ venv/
 .venv/
 ENV/
 
+# Secrets / local env files
+.env
+.env.*
+!.env.example
+
 # IDE
 .vscode/
 .idea/

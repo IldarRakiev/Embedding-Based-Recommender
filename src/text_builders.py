@@ -238,11 +238,12 @@ def dish_to_rich_text(
     include_ratios: bool = False,
     include_ingredients: bool = False,
     context: str | None = None,
+    retrieval_hint: str | None = None,
 ) -> str:
     """Build a rich text representation of a dish for embedding.
 
     The flags control which components are included, enabling A/B comparison
-    of text representations **without modifying this file**.
+    of text representations by passing different flag combinations from notebooks.
 
     Defaults reflect the *baseline* configuration used in Notebook 2.
     Notebook 3 passes different flag combinations to measure each component's
@@ -268,6 +269,9 @@ def dish_to_rich_text(
         context: Meal context string prepended to the text.  Sentence-
             transformers weight early tokens more, so context placed first
             biases retrieval toward the right meal slot.
+        retrieval_hint: Optional short hint appended near the end of the text.
+            Intended for controlled retrieval experiments (e.g. LLM-generated hints
+            stored separately from the baseline dish representation contract).
 
     Returns:
         Rich text string ready for sentence-transformer encoding.
@@ -339,6 +343,10 @@ def dish_to_rich_text(
     # Recipe text (baseline: included, improvement: removed)
     if include_recipe and recipe:
         parts.append("RECIPE_BRIEF: " + recipe[:400])
+
+    hint = _as_clean_str(retrieval_hint)
+    if hint:
+        parts.append("RETRIEVAL_HINT: " + hint)
 
     return "\n".join(parts)
 
